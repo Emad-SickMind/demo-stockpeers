@@ -1,23 +1,84 @@
 # -*- coding: utf-8 -*-
 # Copyright 2024-2025 Streamlit Inc.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#    http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Licensed under the Apache License, Version 2.0
 
+import time
+
+import altair as alt
+import numpy as np
+import pandas as pd
 import streamlit as st
 import yfinance as yf
-import pandas as pd
-import altair as alt
 
+
+# ----------------------------
+# 1) Safe download (Retry + Cache)
+# ----------------------------
+@st.cache_data(ttl=3600, show_spinner=False)  # 1 hour cache
+def safe_download(tickers: list[str], period: str) -> pd.DataFrame:
+    """
+    Download OHLCV data from Yahoo Finance with retry to reduce rate-limit issues.
+    Returns a DataFrame as yfinance.download output.
+    """
+    tickers_str = " ".join(tickers)  # yfinance accepts space separated tickers
+    last_err = None
+
+    for i in range(3):  # 3 tries
+        try:
+            df = yf.download(
+                tickers=tickers_str,
+                period=period,
+                group_by="ticker",
+                auto_adjust=True,
+                threads=False,  # less aggressive -> fewer requests
+                progress=False,
+            )
+
+            if df is None or df.empty:
+                raise ValueError("Empty data returned from Yahoo Finance.")
+
+            return df
+
+        except Exception as e:
+            last_err = e
+            time.sleep(2 * (i + 1))  # 2s, 4s, 6s
+
+    raise last_err
+
+
+def extract_close(download_df: pd.DataFrame, tickers: list[str]) -> pd.DataFrame:
+    """
+    Convert yfinance download output into a DataFrame of Close prices:
+    index: Date
+    columns: tickers
+    """
+    # If single ticker, yfinance returns columns like: Open High Low Close Volume
+    if not isinstance(download_df.columns, pd.MultiIndex):
+        if "Close" not in download_df.columns:
+            raise ValueError("Downloaded data has no 'Close' column.")
+        close = download_df[["Close"]].copy()
+        close.columns = [tickers[0]]
+        close.index.name = "Date"
+        return close
+
+    # Multi-ticker case with group_by="ticker":
+    # columns: (TICKER, field) e.g. ('AAPL','Close')
+    close_cols = {}
+    for t in tickers:
+        if t in download_df.columns.get_level_values(0):
+            # download_df[t] is a sub-DF of fields for ticker t
+            if "Close" in download_df[t].columns:
+                close_cols[t] = download_df[t]["Close"]
+    if not close_cols:
+        raise ValueError("No Close data found for selected tickers.")
+    close = pd.DataFrame(close_cols)
+    close.index.name = "Date"
+    return close
+
+
+# ----------------------------
+# 2) Page config
+# ----------------------------
 st.set_page_config(
     page_title="Stock peer analysis dashboard",
     page_icon=":chart_with_upwards_trend:",
@@ -36,104 +97,18 @@ cols = st.columns([1, 3])
 # Will declare right cell later to avoid showing it when no data.
 
 STOCKS = [
-    "AAPL",
-    "ABBV",
-    "ACN",
-    "ADBE",
-    "ADP",
-    "AMD",
-    "AMGN",
-    "AMT",
-    "AMZN",
-    "APD",
-    "AVGO",
-    "AXP",
-    "BA",
-    "BK",
-    "BKNG",
-    "BMY",
-    "BRK.B",
-    "BSX",
-    "C",
-    "CAT",
-    "CI",
-    "CL",
-    "CMCSA",
-    "COST",
-    "CRM",
-    "CSCO",
-    "CVX",
-    "DE",
-    "DHR",
-    "DIS",
-    "DUK",
-    "ELV",
-    "EOG",
-    "EQR",
-    "FDX",
-    "GD",
-    "GE",
-    "GILD",
-    "GOOG",
-    "GOOGL",
-    "HD",
-    "HON",
-    "HUM",
-    "IBM",
-    "ICE",
-    "INTC",
-    "ISRG",
-    "JNJ",
-    "JPM",
-    "KO",
-    "LIN",
-    "LLY",
-    "LMT",
-    "LOW",
-    "MA",
-    "MCD",
-    "MDLZ",
-    "META",
-    "MMC",
-    "MO",
-    "MRK",
-    "MSFT",
-    "NEE",
-    "NFLX",
-    "NKE",
-    "NOW",
-    "NVDA",
-    "ORCL",
-    "PEP",
-    "PFE",
-    "PG",
-    "PLD",
-    "PM",
-    "PSA",
-    "REGN",
-    "RTX",
-    "SBUX",
-    "SCHW",
-    "SLB",
-    "SO",
-    "SPGI",
-    "T",
-    "TJX",
-    "TMO",
-    "TSLA",
-    "TXN",
-    "UNH",
-    "UNP",
-    "UPS",
-    "V",
-    "VZ",
-    "WFC",
-    "WM",
-    "WMT",
-    "XOM",
+    "AAPL", "ABBV", "ACN", "ADBE", "ADP", "AMD", "AMGN", "AMT", "AMZN", "APD", "AVGO",
+    "AXP", "BA", "BK", "BKNG", "BMY", "BRK.B", "BSX", "C", "CAT", "CI", "CL", "CMCSA",
+    "COST", "CRM", "CSCO", "CVX", "DE", "DHR", "DIS", "DUK", "ELV", "EOG", "EQR", "FDX",
+    "GD", "GE", "GILD", "GOOG", "GOOGL", "HD", "HON", "HUM", "IBM", "ICE", "INTC", "ISRG",
+    "JNJ", "JPM", "KO", "LIN", "LLY", "LMT", "LOW", "MA", "MCD", "MDLZ", "META", "MMC",
+    "MO", "MRK", "MSFT", "NEE", "NFLX", "NKE", "NOW", "NVDA", "ORCL", "PEP", "PFE", "PG",
+    "PLD", "PM", "PSA", "REGN", "RTX", "SBUX", "SCHW", "SLB", "SO", "SPGI", "T", "TJX",
+    "TMO", "TSLA", "TXN", "UNH", "UNP", "UPS", "V", "VZ", "WFC", "WM", "WMT", "XOM",
 ]
 
-DEFAULT_STOCKS = ["AAPL", "MSFT", "GOOGL", "NVDA", "AMZN", "TSLA", "META"]
+# برای اینکه Rate-limit کمتر بخوری، پیش‌فرض رو کم‌تر گذاشتیم:
+DEFAULT_STOCKS = ["AAPL", "MSFT", "NVDA"]
 
 
 def stocks_to_str(stocks):
@@ -146,20 +121,11 @@ if "tickers_input" not in st.session_state:
     ).split(",")
 
 
-# Callback to update query param when input changes
-def update_query_param():
-    if st.session_state.tickers_input:
-        st.query_params["stocks"] = stocks_to_str(st.session_state.tickers_input)
-    else:
-        st.query_params.pop("stocks", None)
-
-
 top_left_cell = cols[0].container(
     border=True, height="stretch", vertical_alignment="center"
 )
 
 with top_left_cell:
-    # Selectbox for stock tickers
     tickers = st.multiselect(
         "Stock tickers",
         options=sorted(set(STOCKS) | set(st.session_state.tickers_input)),
@@ -170,7 +136,7 @@ with top_left_cell:
 
 # Time horizon selector
 horizon_map = {
-    "1 Months": "1mo",
+    "1 Month": "1mo",
     "3 Months": "3mo",
     "6 Months": "6mo",
     "1 Year": "1y",
@@ -180,51 +146,58 @@ horizon_map = {
 }
 
 with top_left_cell:
-    # Buttons for picking time horizon
     horizon = st.pills(
         "Time horizon",
         options=list(horizon_map.keys()),
-        default="6 Months",
+        default="1 Month",  # برای کاهش Rate-limit پیش‌فرض رو کوتاه کردیم
     )
 
 tickers = [t.upper() for t in tickers]
 
-# Update query param when text input changes
+# Update query param
 if tickers:
     st.query_params["stocks"] = stocks_to_str(tickers)
 else:
-    # Clear the param if input is empty
     st.query_params.pop("stocks", None)
 
 if not tickers:
     top_left_cell.info("Pick some stocks to compare", icon=":material/info:")
     st.stop()
 
-
 right_cell = cols[1].container(
     border=True, height="stretch", vertical_alignment="center"
 )
 
 
-@st.cache_resource(show_spinner=False, ttl="6h")
-def load_data(tickers, period):
-    tickers_obj = yf.Tickers(tickers)
-    data = tickers_obj.history(period=period)
-    if data is None:
-        raise RuntimeError("YFinance returned no data.")
-    return data["Close"]
+# ----------------------------
+# 3) Load close prices (uses safe_download)
+# ----------------------------
+@st.cache_data(show_spinner=False, ttl=3600)
+def load_close_prices(tickers: list[str], period: str) -> pd.DataFrame:
+    raw = safe_download(tickers, period)
+    close = extract_close(raw, tickers)
+    if close is None or close.empty:
+        raise RuntimeError("No close price data returned.")
+    return close
 
 
-# Load the data
+# Load the data (with friendly handling)
 try:
-    data = load_data(tickers, horizon_map[horizon])
-except yf.exceptions.YFRateLimitError as e:
-    st.warning("YFinance is rate-limiting us :(\nTry again later.")
-    load_data.clear()  # Remove the bad cache entry.
+    data = load_close_prices(tickers, horizon_map[horizon])
+
+except yf.exceptions.YFRateLimitError:
+    st.warning("Yahoo Finance الان Rate limit کرده (Too Many Requests).")
+    st.info("برای دمو: تعداد نمادها رو کم کن (مثلاً 1-2 تا) و بازه رو کوتاه بگذار (1 Month).")
     st.stop()
 
-empty_columns = data.columns[data.isna().all()].tolist()
+except Exception as e:
+    st.error("Error while fetching data.")
+    st.caption(f"Details: {e}")
+    st.stop()
 
+
+# Check empty columns (all NaN)
+empty_columns = data.columns[data.isna().all()].tolist()
 if empty_columns:
     st.error(f"Error loading data for the tickers: {', '.join(empty_columns)}.")
     st.stop()
@@ -241,20 +214,19 @@ bottom_left_cell = cols[0].container(
 )
 
 with bottom_left_cell:
-    cols = st.columns(2)
-    cols[0].metric(
+    mcols = st.columns(2)
+    mcols[0].metric(
         "Best stock",
         max_norm_value[1],
         delta=f"{round(max_norm_value[0] * 100)}%",
         width="content",
     )
-    cols[1].metric(
+    mcols[1].metric(
         "Worst stock",
         min_norm_value[1],
         delta=f"{round(min_norm_value[0] * 100)}%",
         width="content",
     )
-
 
 # Plot normalized prices
 with right_cell:
@@ -270,11 +242,12 @@ with right_cell:
             alt.Y("Normalized price:Q").scale(zero=False),
             alt.Color("Stock:N"),
         )
-        .properties(height=400)
+        .properties(height=400),
+        use_container_width=True,
     )
 
-""
-""
+""  # spacer
+""  # spacer
 
 # Plot individual stock vs peer average
 """
@@ -289,14 +262,12 @@ if len(tickers) <= 1:
     st.stop()
 
 NUM_COLS = 4
-cols = st.columns(NUM_COLS)
+cols2 = st.columns(NUM_COLS)
 
 for i, ticker in enumerate(tickers):
-    # Calculate peer average (excluding current stock)
     peers = normalized.drop(columns=[ticker])
     peer_avg = peers.mean(axis=1)
 
-    # Create DataFrame with peer average.
     plot_data = pd.DataFrame(
         {
             "Date": normalized.index,
@@ -321,20 +292,20 @@ for i, ticker in enumerate(tickers):
         .properties(title=f"{ticker} vs peer average", height=300)
     )
 
-    cell = cols[(i * 2) % NUM_COLS].container(border=True)
+    cell = cols2[(i * 2) % NUM_COLS].container(border=True)
     cell.write("")
     cell.altair_chart(chart, use_container_width=True)
 
-    # Create Delta chart
-    plot_data = pd.DataFrame(
+    # Delta chart
+    plot_data2 = pd.DataFrame(
         {
             "Date": normalized.index,
             "Delta": normalized[ticker] - peer_avg,
         }
     )
 
-    chart = (
-        alt.Chart(plot_data)
+    chart2 = (
+        alt.Chart(plot_data2)
         .mark_area()
         .encode(
             alt.X("Date:T"),
@@ -343,12 +314,12 @@ for i, ticker in enumerate(tickers):
         .properties(title=f"{ticker} minus peer average", height=300)
     )
 
-    cell = cols[(i * 2 + 1) % NUM_COLS].container(border=True)
+    cell = cols2[(i * 2 + 1) % NUM_COLS].container(border=True)
     cell.write("")
-    cell.altair_chart(chart, use_container_width=True)
+    cell.altair_chart(chart2, use_container_width=True)
 
-""
-""
+""  # spacer
+""  # spacer
 
 """
 ## Raw data
