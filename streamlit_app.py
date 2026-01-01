@@ -12,6 +12,24 @@ import yfinance as yf
 
 
 # ----------------------------
+# 0) Top market-cap cryptos (Yahoo Finance tickers)
+# ----------------------------
+# (Common top market-cap set: BTC, ETH, USDT, BNB, XRP, USDC, SOL, TRX, DOGE, ADA)
+CRYPTO_TOP10 = [
+    "BTC-USD",
+    "ETH-USD",
+    "USDT-USD",
+    "BNB-USD",
+    "XRP-USD",
+    "USDC-USD",
+    "SOL-USD",
+    "TRX-USD",
+    "DOGE-USD",
+    "ADA-USD",
+]
+
+
+# ----------------------------
 # 1) Safe download (Retry + Cache)
 # ----------------------------
 @st.cache_data(ttl=3600, show_spinner=False)  # 1 hour cache
@@ -64,13 +82,15 @@ def extract_close(download_df: pd.DataFrame, tickers: list[str]) -> pd.DataFrame
     # Multi-ticker case with group_by="ticker":
     # columns: (TICKER, field) e.g. ('AAPL','Close')
     close_cols = {}
+    level0 = download_df.columns.get_level_values(0)
     for t in tickers:
-        if t in download_df.columns.get_level_values(0):
-            # download_df[t] is a sub-DF of fields for ticker t
+        if t in level0:
             if "Close" in download_df[t].columns:
                 close_cols[t] = download_df[t]["Close"]
+
     if not close_cols:
         raise ValueError("No Close data found for selected tickers.")
+
     close = pd.DataFrame(close_cols)
     close.index.name = "Date"
     return close
@@ -80,15 +100,15 @@ def extract_close(download_df: pd.DataFrame, tickers: list[str]) -> pd.DataFrame
 # 2) Page config
 # ----------------------------
 st.set_page_config(
-    page_title="Stock peer analysis dashboard",
+    page_title="Stock/Crypto peer analysis dashboard",
     page_icon=":chart_with_upwards_trend:",
     layout="wide",
 )
 
 """
-# :material/query_stats: Stock peer analysis
+# :material/query_stats: Stock/Crypto peer analysis
 
-Easily compare stocks against others in their peer group.
+Easily compare stocks and top market-cap crypto assets.
 """
 
 ""  # Add some space.
@@ -108,16 +128,16 @@ STOCKS = [
 ]
 
 # برای اینکه Rate-limit کمتر بخوری، پیش‌فرض رو کم‌تر گذاشتیم:
-DEFAULT_STOCKS = ["AAPL", "MSFT", "NVDA"]
+DEFAULT_ASSETS = ["AAPL", "MSFT", "NVDA", "BTC-USD", "ETH-USD"]  # هم سهام هم کریپتو (کم)
 
 
-def stocks_to_str(stocks):
-    return ",".join(stocks)
+def assets_to_str(assets: list[str]) -> str:
+    return ",".join(assets)
 
 
 if "tickers_input" not in st.session_state:
     st.session_state.tickers_input = st.query_params.get(
-        "stocks", stocks_to_str(DEFAULT_STOCKS)
+        "stocks", assets_to_str(DEFAULT_ASSETS)
     ).split(",")
 
 
@@ -125,12 +145,14 @@ top_left_cell = cols[0].container(
     border=True, height="stretch", vertical_alignment="center"
 )
 
+ALL_OPTIONS = sorted(set(STOCKS) | set(CRYPTO_TOP10) | set(st.session_state.tickers_input))
+
 with top_left_cell:
     tickers = st.multiselect(
-        "Stock tickers",
-        options=sorted(set(STOCKS) | set(st.session_state.tickers_input)),
+        "Assets (stocks + crypto)",
+        options=ALL_OPTIONS,
         default=st.session_state.tickers_input,
-        placeholder="Choose stocks to compare. Example: NVDA",
+        placeholder="Choose assets to compare. Example: NVDA, BTC-USD",
         accept_new_options=True,
     )
 
@@ -154,14 +176,14 @@ with top_left_cell:
 
 tickers = [t.upper() for t in tickers]
 
-# Update query param
+# Update query param (kept name "stocks" for backward compatibility)
 if tickers:
-    st.query_params["stocks"] = stocks_to_str(tickers)
+    st.query_params["stocks"] = assets_to_str(tickers)
 else:
     st.query_params.pop("stocks", None)
 
 if not tickers:
-    top_left_cell.info("Pick some stocks to compare", icon=":material/info:")
+    top_left_cell.info("Pick some assets to compare", icon=":material/info:")
     st.stop()
 
 right_cell = cols[1].container(
@@ -205,9 +227,15 @@ if empty_columns:
 # Normalize prices (start at 1)
 normalized = data.div(data.iloc[0])
 
-latest_norm_values = {normalized[ticker].iat[-1]: ticker for ticker in tickers}
-max_norm_value = max(latest_norm_values.items())
-min_norm_value = min(latest_norm_values.items())
+# Best/Worst based on latest normalized value (more robust)
+latest = normalized.iloc[-1]
+best_ticker = latest.idxmax()
+worst_ticker = latest.idxmin()
+best_val = float(latest.max())
+worst_val = float(latest.min())
+
+best_delta_pct = (best_val - 1.0) * 100.0
+worst_delta_pct = (worst_val - 1.0) * 100.0
 
 bottom_left_cell = cols[0].container(
     border=True, height="stretch", vertical_alignment="center"
@@ -216,15 +244,15 @@ bottom_left_cell = cols[0].container(
 with bottom_left_cell:
     mcols = st.columns(2)
     mcols[0].metric(
-        "Best stock",
-        max_norm_value[1],
-        delta=f"{round(max_norm_value[0] * 100)}%",
+        "Best asset",
+        best_ticker,
+        delta=f"{best_delta_pct:.1f}%",
         width="content",
     )
     mcols[1].metric(
-        "Worst stock",
-        min_norm_value[1],
-        delta=f"{round(min_norm_value[0] * 100)}%",
+        "Worst asset",
+        worst_ticker,
+        delta=f"{worst_delta_pct:.1f}%",
         width="content",
     )
 
@@ -233,14 +261,14 @@ with right_cell:
     st.altair_chart(
         alt.Chart(
             normalized.reset_index().melt(
-                id_vars=["Date"], var_name="Stock", value_name="Normalized price"
+                id_vars=["Date"], var_name="Asset", value_name="Normalized price"
             )
         )
         .mark_line()
         .encode(
             alt.X("Date:T"),
             alt.Y("Normalized price:Q").scale(zero=False),
-            alt.Color("Stock:N"),
+            alt.Color("Asset:N"),
         )
         .properties(height=400),
         use_container_width=True,
@@ -249,16 +277,16 @@ with right_cell:
 ""  # spacer
 ""  # spacer
 
-# Plot individual stock vs peer average
+# Plot individual asset vs peer average
 """
-## Individual stocks vs peer average
+## Individual assets vs peer average
 
-For the analysis below, the "peer average" when analyzing stock X always
+For the analysis below, the "peer average" when analyzing asset X always
 excludes X itself.
 """
 
 if len(tickers) <= 1:
-    st.warning("Pick 2 or more tickers to compare them")
+    st.warning("Pick 2 or more assets to compare them")
     st.stop()
 
 NUM_COLS = 4
